@@ -48428,9 +48428,54 @@ function toGeaEventType(attrName) {
   if (attrName.startsWith("on") && attrName.length > 2) return attrName.slice(2).toLowerCase();
   return attrName;
 }
+const OTHER_DOM_EVENTS = /* @__PURE__ */ new Set([
+  "auxclick",
+  "beforeinput",
+  "compositionstart",
+  "compositionupdate",
+  "compositionend",
+  "copy",
+  "cut",
+  "paste",
+  "dragenter",
+  "dragexit",
+  "focusin",
+  "focusout",
+  "invalid",
+  "select",
+  "toggle",
+  "load",
+  "error",
+  "abort",
+  "touchcancel",
+  "canplay",
+  "canplaythrough",
+  "durationchange",
+  "emptied",
+  "encrypted",
+  "ended",
+  "loadeddata",
+  "loadedmetadata",
+  "loadstart",
+  "pause",
+  "play",
+  "playing",
+  "progress",
+  "ratechange",
+  "seeked",
+  "seeking",
+  "stalled",
+  "suspend",
+  "timeupdate",
+  "volumechange",
+  "waiting"
+]);
 function isCaptureEventAttr(attrName) {
-  if (!/^on[A-Z]\w*Capture$/.test(attrName)) return false;
-  return attrName !== "onGotPointerCapture" && attrName !== "onLostPointerCapture";
+  if (!attrName.startsWith("on")) return false;
+  const type = toGeaEventType(attrName);
+  if (!type.endsWith("capture")) return false;
+  const bubbling = type.slice(0, -"capture".length);
+  return EVENT_NAMES.has(bubbling) || OTHER_DOM_EVENTS.has(bubbling);
 }
 
 function escapeAttr(s) {
@@ -48879,6 +48924,7 @@ function formatStaticAttr(name, rawValue) {
 }
 
 function emitSlot(slot, stmts, ctx) {
+  const written = slot.expr;
   slot.expr = substituteBindings(slot.expr, ctx.bindings);
   if (slot.kind === "text") {
     const markerId = libExports.identifier("marker" + slot.index);
@@ -49083,13 +49129,7 @@ function emitSlot(slot, stmts, ctx) {
   if (slot.kind === "ref") {
     const elId = libExports.identifier("el" + slot.index);
     const target = substituteBindings(slot.expr, ctx.bindings);
-    if (!libExports.isMemberExpression(target) && !libExports.isIdentifier(target)) {
-      throw compilerError(
-        "ref only accepts a property or variable to assign the element to; callback refs are not supported.",
-        slot.expr,
-        "Use an assignable target, e.g. ref={this.input}, and read this.input after render."
-      );
-    }
+    if (!libExports.isMemberExpression(target) && !libExports.isIdentifier(target)) throw refTargetError(written, target, ctx);
     stmts.push(libExports.expressionStatement(libExports.assignmentExpression("=", target, elId)));
     return;
   }
@@ -49110,6 +49150,28 @@ function emitSlot(slot, stmts, ctx) {
     return;
   }
   throw new Error(`emit: unsupported slot kind '${slot.kind}'`);
+}
+function refTargetError(written, target, ctx) {
+  let expr = written;
+  while (libExports.isTSAsExpression(expr) || libExports.isTSNonNullExpression(expr) || libExports.isTSTypeAssertion(expr)) expr = expr.expression;
+  const hint = "Use an assignable target, e.g. ref={this.input}, and read this.input after render.";
+  if (libExports.isFunction(expr)) {
+    return compilerError(
+      "ref only accepts a property or variable to assign the element to; callback refs are not supported.",
+      written,
+      hint
+    );
+  }
+  if (libExports.isIdentifier(expr)) {
+    const code = generate$1(target).code;
+    const value = code.length <= 40 ? ` (${code})` : "";
+    return compilerError(
+      `ref={${expr.name}} has no variable to assign the element to: the compiler inlines \`${expr.name}\` as its initializer${value}.`,
+      written,
+      `Declare it as \`let ${expr.name}\` with no initializer so it stays a variable` + (libExports.isThisExpression(ctx.reactiveRoot) ? ", or use a class field such as ref={this.input}." : ".")
+    );
+  }
+  return compilerError("ref only accepts a property or variable to assign the element to.", written, hint);
 }
 function canUseScalarTextHelper(expr) {
   if (containsJsx(expr)) return false;
