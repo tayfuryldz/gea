@@ -1,4 +1,4 @@
-import type { Expression, JSXElement, JSXFragment, JSXMemberExpression } from '@babel/types'
+import type { Expression, JSXElement, JSXFragment, JSXMemberExpression, JSXSpreadAttribute } from '@babel/types'
 
 import { generate, t } from '../../utils/babel-interop.ts'
 import { compilerError } from '../../utils/compile-error.ts'
@@ -212,10 +212,23 @@ export function walkJsxToTemplate(root: JSXElement | JSXFragment, options: WalkO
       )
     }
     const tagName = name.name
+    const isComponentTag = tagName[0] === tagName[0].toUpperCase()
+    // Neither path compiles a spread: elements would drop it from the template,
+    // and components would get props without it.
+    const spread = opening.attributes.find((attr): attr is JSXSpreadAttribute => t.isJSXSpreadAttribute(attr))
+    if (spread) {
+      throw compilerError(
+        `Spread attributes like {...${spreadSource(spread.argument)}} on <${tagName}> are not supported.`,
+        spread,
+        isComponentTag
+          ? `Pass each prop individually: <${tagName} label={…} onSelect={…} />.`
+          : `Pass each attribute individually: <${tagName} id={…} onClick={…}>.`,
+      )
+    }
     // Component tag (capitalized) → mount slot, emit <!--mount N--> placeholder.
     // Within a keyed-list map callback the compiler may hoist the `key` attribute
     // out before this walker is called; here we simply preserve attributes.
-    if (tagName[0] === tagName[0].toUpperCase()) {
+    if (isComponentTag) {
       const slot: Slot = {
         index: nextSlot++,
         walk: walk.slice(),
@@ -230,13 +243,6 @@ export function walkJsxToTemplate(root: JSXElement | JSXFragment, options: WalkO
     // Plain HTML element
     let html = '<' + tagName
     for (const attr of opening.attributes) {
-      if (t.isJSXSpreadAttribute(attr)) {
-        throw compilerError(
-          `Spread attributes like {...${spreadSource(attr.argument)}} on <${tagName}> are not supported.`,
-          attr,
-          `Pass each attribute individually: <${tagName} id={…} onClick={…}>.`,
-        )
-      }
       if (t.isJSXAttribute(attr)) {
         const rawAttrName = t.isJSXIdentifier(attr.name) ? attr.name.name : ''
         if (isCaptureEventAttr(rawAttrName)) {
