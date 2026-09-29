@@ -45315,65 +45315,65 @@ function containsJsx(node) {
   }
   return false;
 }
-function lowerJsxInExpression(expr, ctx) {
+function lowerJsxInExpression(expr, ctx, site) {
   if (!expr) return expr;
   if (libExports.isJSXElement(expr) || libExports.isJSXFragment(expr)) {
     const block = compileJsxToBlock(expr, ctx);
-    return libExports.callExpression(libExports.arrowFunctionExpression([], block), []);
+    const built = libExports.callExpression(libExports.arrowFunctionExpression([], block), []);
+    return site ? site(built) : built;
   }
+  const lower = (e) => lowerJsxInExpression(e, ctx, site);
   if (libExports.isConditionalExpression(expr)) {
     return {
       ...expr,
-      test: lowerJsxInExpression(expr.test, ctx),
-      consequent: lowerJsxInExpression(expr.consequent, ctx),
-      alternate: lowerJsxInExpression(expr.alternate, ctx)
+      test: lower(expr.test),
+      consequent: lower(expr.consequent),
+      alternate: lower(expr.alternate)
     };
   }
   if (libExports.isLogicalExpression(expr) || libExports.isBinaryExpression(expr)) {
-    return { ...expr, left: lowerJsxInExpression(expr.left, ctx), right: lowerJsxInExpression(expr.right, ctx) };
+    return { ...expr, left: lower(expr.left), right: lower(expr.right) };
   }
   if (libExports.isCallExpression(expr) || libExports.isOptionalCallExpression(expr)) {
     return {
       ...expr,
-      callee: lowerJsxInExpression(expr.callee, ctx),
-      arguments: expr.arguments.map((a) => lowerJsxInExpression(a, ctx))
+      callee: lower(expr.callee),
+      arguments: expr.arguments.map((a) => lower(a))
     };
   }
   if (libExports.isMemberExpression(expr) || libExports.isOptionalMemberExpression(expr)) {
     return {
       ...expr,
-      object: lowerJsxInExpression(expr.object, ctx),
-      property: expr.computed ? lowerJsxInExpression(expr.property, ctx) : expr.property
+      object: lower(expr.object),
+      property: expr.computed ? lower(expr.property) : expr.property
     };
   }
   if (libExports.isUnaryExpression(expr) || libExports.isUpdateExpression(expr)) {
-    return { ...expr, argument: lowerJsxInExpression(expr.argument, ctx) };
+    return { ...expr, argument: lower(expr.argument) };
   }
   if (libExports.isArrayExpression(expr)) {
-    return { ...expr, elements: expr.elements.map((e) => e ? lowerJsxInExpression(e, ctx) : e) };
+    return { ...expr, elements: expr.elements.map((e) => e ? lower(e) : e) };
   }
   if (libExports.isObjectExpression(expr)) {
     return {
       ...expr,
-      properties: expr.properties.map(
-        (p) => libExports.isObjectProperty(p) ? { ...p, value: lowerJsxInExpression(p.value, ctx) } : p
-      )
+      properties: expr.properties.map((p) => libExports.isObjectProperty(p) ? { ...p, value: lower(p.value) } : p)
     };
   }
   if (libExports.isTemplateLiteral(expr)) {
-    return { ...expr, expressions: expr.expressions.map((e) => lowerJsxInExpression(e, ctx)) };
+    return { ...expr, expressions: expr.expressions.map((e) => lower(e)) };
   }
   if (libExports.isAssignmentExpression(expr)) {
-    return { ...expr, right: lowerJsxInExpression(expr.right, ctx) };
+    return { ...expr, right: lower(expr.right) };
   }
   if (libExports.isSequenceExpression(expr)) {
-    return { ...expr, expressions: expr.expressions.map((e) => lowerJsxInExpression(e, ctx)) };
+    return { ...expr, expressions: expr.expressions.map((e) => lower(e)) };
   }
   if (libExports.isNewExpression(expr)) {
     return {
       ...expr,
-      callee: lowerJsxInExpression(expr.callee, ctx),
-      arguments: expr.arguments.map((a) => lowerJsxInExpression(a, ctx))
+      callee: lower(expr.callee),
+      arguments: expr.arguments.map((a) => lower(a))
     };
   }
   if (libExports.isArrowFunctionExpression(expr) || libExports.isFunctionExpression(expr)) {
@@ -47947,10 +47947,10 @@ function emitMountSlot(slot, stmts, ctx) {
   if (children && children.length > 0) {
     const meaningful = children.filter((c) => !(libExports.isJSXText(c) && /^\s*$/.test(c.value)));
     if (meaningful.length > 0) {
-      const hasChildrenAttr2 = attrs.some(
+      const hasChildrenAttr = attrs.some(
         (a) => libExports.isJSXAttribute(a) && libExports.isJSXIdentifier(a.name, { name: "children" })
       );
-      if (!hasChildrenAttr2) {
+      if (!hasChildrenAttr) {
         const childrenThunk = buildChildrenThunk(meaningful, ctx);
         if (childrenThunk) {
           propsObj.properties.push(libExports.objectProperty(libExports.identifier("children"), childrenThunk));
@@ -47963,7 +47963,7 @@ function emitMountSlot(slot, stmts, ctx) {
     return;
   }
   if (ctx.directFactoryComponents?.has(tag)) {
-    emitDirectFactoryMount(tag, anchorId, propsObj, attrs, stmts, slot.index);
+    emitDirectFactoryMount(tag, anchorId, propsObj, stmts, slot.index);
     return;
   }
   ctx.importsNeeded.add("mount");
@@ -48036,14 +48036,14 @@ function emitDirectClassMount(tag, anchorId, propsObj, stmts, ctx, slotIndex) {
     )
   );
 }
-function emitDirectFactoryMount(tag, anchorId, propsObj, attrs, stmts, slotIndex) {
+function emitDirectFactoryMount(tag, anchorId, propsObj, stmts, slotIndex) {
   const thunksId = libExports.identifier("__th" + slotIndex);
   const propsId = libExports.identifier("__fp" + slotIndex);
   const keyId = libExports.identifier("__k" + slotIndex);
   const thunkId = libExports.identifier("__t" + slotIndex);
   const disposerId = libExports.identifier("__fd" + slotIndex);
   const outId = libExports.identifier("__out" + slotIndex);
-  const directProps = hasChildrenAttr(attrs) ? null : buildDirectFactoryPropsObject(propsObj);
+  const directProps = buildDirectFactoryPropsObject(propsObj);
   if (directProps) {
     stmts.push(libExports.variableDeclaration("const", [libExports.variableDeclarator(propsId, directProps)]));
   } else {
@@ -48081,7 +48081,6 @@ function emitDirectFactoryMount(tag, anchorId, propsObj, attrs, stmts, slotIndex
       )
     );
   }
-  if (!directProps && hasChildrenAttr(attrs)) emitChildrenMemoizer(thunksId, propsId, stmts, slotIndex);
   stmts.push(
     libExports.variableDeclaration("const", [
       libExports.variableDeclarator(
@@ -48152,65 +48151,6 @@ function containsThisExpression(node) {
   }
   return false;
 }
-function emitChildrenMemoizer(thunksId, propsId, stmts, slotIndex) {
-  const cachedId = libExports.identifier("__ch" + slotIndex);
-  const cacheNodeId = libExports.identifier("__chn" + slotIndex);
-  const valueId = libExports.identifier("__chv" + slotIndex);
-  const childrenMember = libExports.memberExpression(thunksId, libExports.identifier("children"));
-  stmts.push(
-    libExports.ifStatement(
-      libExports.binaryExpression("===", libExports.unaryExpression("typeof", libExports.cloneNode(childrenMember)), libExports.stringLiteral("function")),
-      libExports.blockStatement([
-        libExports.variableDeclaration("let", [libExports.variableDeclarator(cachedId)]),
-        libExports.variableDeclaration("let", [libExports.variableDeclarator(cacheNodeId, libExports.booleanLiteral(false))]),
-        libExports.expressionStatement(
-          libExports.callExpression(libExports.memberExpression(libExports.identifier("Object"), libExports.identifier("defineProperty")), [
-            propsId,
-            libExports.stringLiteral("children"),
-            libExports.objectExpression([
-              libExports.objectProperty(libExports.identifier("enumerable"), libExports.booleanLiteral(true)),
-              libExports.objectProperty(libExports.identifier("configurable"), libExports.booleanLiteral(true)),
-              libExports.objectProperty(
-                libExports.identifier("get"),
-                libExports.arrowFunctionExpression(
-                  [],
-                  libExports.blockStatement([
-                    libExports.ifStatement(cacheNodeId, libExports.returnStatement(cachedId)),
-                    libExports.variableDeclaration("const", [
-                      libExports.variableDeclarator(valueId, libExports.callExpression(libExports.cloneNode(childrenMember), []))
-                    ]),
-                    libExports.ifStatement(
-                      libExports.logicalExpression(
-                        "&&",
-                        libExports.cloneNode(valueId),
-                        libExports.binaryExpression(
-                          "===",
-                          libExports.unaryExpression("typeof", libExports.memberExpression(valueId, libExports.identifier("nodeType"))),
-                          libExports.stringLiteral("number")
-                        )
-                      ),
-                      libExports.blockStatement([
-                        libExports.expressionStatement(libExports.assignmentExpression("=", cachedId, libExports.cloneNode(valueId))),
-                        libExports.expressionStatement(libExports.assignmentExpression("=", cacheNodeId, libExports.booleanLiteral(true)))
-                      ])
-                    ),
-                    libExports.returnStatement(valueId)
-                  ])
-                )
-              )
-            ])
-          ])
-        )
-      ])
-    )
-  );
-}
-function hasChildrenAttr(attrs) {
-  for (const attr of attrs) {
-    if (libExports.isJSXAttribute(attr) && libExports.isJSXIdentifier(attr.name, { name: "children" })) return true;
-  }
-  return false;
-}
 function buildChildrenThunk(children, ctx) {
   if (children.length === 0) return null;
   if (children.length === 1) {
@@ -48227,20 +48167,18 @@ function buildChildrenThunk(children, ctx) {
         const returned = libExports.isBlockStatement(body) ? body.body.find((s) => libExports.isReturnStatement(s))?.argument : body;
         if (returned && (libExports.isJSXElement(returned) || libExports.isJSXFragment(returned))) {
           const branchFn = buildMapBranchFn(substituted, ctx);
-          return libExports.arrowFunctionExpression([], branchFn.body);
+          return memoizedThunk(branchFn.body);
         }
       }
-      return libExports.arrowFunctionExpression([], lowerJsxInExpression(substituted, ctx));
+      return buildExpressionThunk(substituted, ctx, true);
     }
     if (libExports.isJSXElement(c) || libExports.isJSXFragment(c)) {
-      const block2 = compileJsxToBlock(c, ctx);
-      return libExports.arrowFunctionExpression([], block2);
+      return memoizedThunk(compileJsxToBlock(c, ctx));
     }
     return null;
   }
   const frag = libExports.jsxFragment(libExports.jsxOpeningFragment(), libExports.jsxClosingFragment(), children);
-  const block = compileJsxToBlock(frag, ctx);
-  return libExports.arrowFunctionExpression([], block);
+  return memoizedThunk(compileJsxToBlock(frag, ctx));
 }
 function memoizedThunk(block) {
   const inner = libExports.arrowFunctionExpression([], block);
@@ -48261,6 +48199,29 @@ function memoizedThunk(block) {
   );
   return libExports.callExpression(outer, []);
 }
+function buildExpressionThunk(expr, ctx, isChildren) {
+  const sites = [];
+  const value = lowerJsxInExpression(expr, ctx, (built) => {
+    const id = libExports.identifier("__m" + sites.length);
+    sites.push(id);
+    return libExports.logicalExpression("??", id, libExports.assignmentExpression("=", libExports.cloneNode(id), built));
+  });
+  const thunk = libExports.arrowFunctionExpression([], value);
+  if (sites.length === 0) {
+    return !isChildren && containsJsx(expr) ? memoizedThunk(libExports.blockStatement([libExports.returnStatement(value)])) : thunk;
+  }
+  const outer = libExports.arrowFunctionExpression(
+    [],
+    libExports.blockStatement([
+      libExports.variableDeclaration(
+        "let",
+        sites.map((id) => libExports.variableDeclarator(libExports.cloneNode(id)))
+      ),
+      libExports.returnStatement(thunk)
+    ])
+  );
+  return libExports.callExpression(outer, []);
+}
 function buildPropsObject(attrs, ctx) {
   const properties = [];
   for (const attr of attrs) {
@@ -48270,16 +48231,13 @@ function buildPropsObject(attrs, ctx) {
     else if (libExports.isJSXNamespacedName(attr.name)) name = `${attr.name.namespace.name}:${attr.name.name.name}`;
     else continue;
     if (name === "key") continue;
-    let value;
-    let wrapMemo = false;
-    if (!attr.value) value = libExports.booleanLiteral(true);
-    else if (libExports.isStringLiteral(attr.value)) value = libExports.stringLiteral(attr.value.value);
+    let thunk;
+    if (!attr.value) thunk = libExports.arrowFunctionExpression([], libExports.booleanLiteral(true));
+    else if (libExports.isStringLiteral(attr.value)) thunk = libExports.arrowFunctionExpression([], libExports.stringLiteral(attr.value.value));
     else if (libExports.isJSXExpressionContainer(attr.value)) {
       const sub = substituteBindings(attr.value.expression, ctx.bindings);
-      wrapMemo = containsJsx(sub);
-      value = lowerJsxInExpression(sub, ctx);
+      thunk = buildExpressionThunk(sub, ctx, name === "children");
     } else continue;
-    const thunk = wrapMemo ? memoizedThunk(libExports.blockStatement([libExports.returnStatement(value)])) : libExports.arrowFunctionExpression([], value);
     const isValidIdent = /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name);
     const keyNode = isValidIdent ? libExports.identifier(name) : libExports.stringLiteral(name);
     properties.push(libExports.objectProperty(
