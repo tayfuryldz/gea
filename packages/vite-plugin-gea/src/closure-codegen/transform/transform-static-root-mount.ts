@@ -29,6 +29,7 @@ import {
   rewriteFnComponent,
 } from './transform-components.ts'
 import { ensureCoreImports } from './transform-imports.ts'
+import { assertNoStringTags } from './transform-unsupported-jsx.ts'
 
 interface MountPattern {
   appImport: string
@@ -195,6 +196,9 @@ function createStaticTemplateFactory(
   } catch {
     return null
   }
+  // transformFile's whole-file checks don't run on code inlined here. A
+  // failed check aborts the inlining, and the pipeline reports it.
+  assertNoStringTags(ast)
 
   const classDecl = findDefaultClassDeclaration(ast)
   if (!classDecl || !canUseStaticCompiledComponent(classDecl)) return null
@@ -355,6 +359,7 @@ function collectImportedStaticFunctionComponents(
     watchFiles.add(resolved)
     const imported = readImportModule(resolved)
     if (!imported) return false
+    assertNoStringTags(imported.ast)
     for (const spec of componentSpecs) {
       const localName = spec.local.name
       const exportedName = getImportedExportName(spec)

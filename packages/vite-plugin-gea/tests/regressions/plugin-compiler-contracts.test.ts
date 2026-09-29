@@ -49,16 +49,22 @@ export default class C extends Component {
     assert.match(code, /reactiveAttr\(/)
   })
 
-  it('JSX spread: file is still rewritten; spread is not expanded in the template walker (known limitation)', () => {
-    const { code, changed } = compile(
-      `import { Component } from '@geajs/core'
+  it('JSX spread on an element is a compile error, not a silently dropped attribute (#105)', () => {
+    assert.throws(
+      () =>
+        compile(
+          `import { Component } from '@geajs/core'
 const extra = { id: 'e' } as any
 export default class C extends Component {
   template() { return <div {...extra}>a</div> }
 }`,
+        ),
+      (err: any) => {
+        assert.match(err.message, /Spread attributes like \{\.\.\.extra\} on <div> are not supported\./)
+        assert.deepEqual(err.loc, { line: 4, column: 27 })
+        return true
+      },
     )
-    assert.equal(changed, true)
-    assert.ok(code.includes('reactiveText') || code.includes('_tpl'), 'transform should still emit a template')
   })
 
   it('function-valued JSX child: transform still emits runnable code (not a hard error today)', () => {

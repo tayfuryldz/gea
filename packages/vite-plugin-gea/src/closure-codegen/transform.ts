@@ -3,9 +3,10 @@
  */
 
 import { parse } from '@babel/parser'
-import type { ClassDeclaration, File, TSTypeLiteral } from '@babel/types'
+import type { ClassDeclaration, ClassMethod, File, TSTypeLiteral } from '@babel/types'
 
 import { generate, t } from '../utils/babel-interop.ts'
+import { compilerError } from '../utils/compile-error.ts'
 
 import type { DirectFnComponentParams } from './emit.ts'
 import { buildCreateTemplateMethod, createEmitContext, lowerJsxInStatement } from './emit.ts'
@@ -40,6 +41,7 @@ import {
 } from './transform/transform-component-props.ts'
 import { ensureCoreImports, injectTemplateDecls } from './transform/transform-imports.ts'
 import { extractPrecedingStatements, foldEarlyReturnGuards } from './transform/transform-template-methods.ts'
+import { assertNoNestedComponentClasses, assertNoStringTags } from './transform/transform-unsupported-jsx.ts'
 
 export interface TransformResult {
   code: string
@@ -88,6 +90,9 @@ export function transformFile(source: string, _filename?: string, options: Trans
   } catch {
     return { code: source, changed: false, rewritten: [], importsNeeded: [] }
   }
+
+  assertNoNestedComponentClasses(ast)
+  assertNoStringTags(ast)
 
   const ctx = createEmitContext()
   ctx.irTemplates = []
@@ -155,9 +160,12 @@ export function transformFile(source: string, _filename?: string, options: Trans
         if (bodyContainsJsx(m.body)) methodsWithJsx.push(m)
       }
       if (!templateMethod && methodsWithJsx.length === 0) continue
-      if (templateMethod && !extendsComponent(classDecl)) continue
+      if (templateMethod && !extendsComponent(classDecl) && !extendsKnownComponent(classDecl, ctx)) continue
       const jsx = templateMethod ? extractTemplateJsx(templateMethod) : null
-      if (templateMethod && !jsx) continue
+      if (templateMethod && !jsx) {
+        if (bodyContainsJsx(templateMethod.body)) throw nonJsxTemplateError(classDecl, templateMethod)
+        continue
+      }
       const useStaticCompiledComponent = canUseStaticCompiledComponent(classDecl)
       const useCompiledComponent = !useStaticCompiledComponent && canSkipComponentStoreProxy(classDecl)
       const useTinyReactiveComponent =
@@ -573,6 +581,27 @@ function applyPropsTypeArgument(
   const emptyPropsType = t.tsTypeLiteral([])
   if (!classPropsReadsAreCovered(classDecl, emptyPropsType)) return
   classDecl.superTypeParameters = t.tsTypeParameterInstantiation([emptyPropsType])
+}
+
+/** A subclass of a class component declared in this module or imported from one. */
+function extendsKnownComponent(classDecl: ClassDeclaration, ctx: ReturnType<typeof createEmitContext>): boolean {
+  return t.isIdentifier(classDecl.superClass) && ctx.directClassComponents?.has(classDecl.superClass.name) === true
+}
+
+/**
+ * Only `return <jsx />` compiles. A `template()` that builds its JSX any
+ * other way (`return c ? <A /> : <B />`) would keep its raw JSX calls and
+ * render nothing, so fail the build. Function components are compiled by
+ * `rewriteFnComponent`, not here.
+ */
+function nonJsxTemplateError(classDecl: ClassDeclaration, templateMethod: ClassMethod): Error {
+  const className = classDecl.id?.name ?? '<anonymous>'
+  const ret = templateMethod.body.body.find((s) => t.isReturnStatement(s))
+  return compilerError(
+    `\`${className}.template()\` must return a single JSX element or fragment.`,
+    (ret as any)?.argument ?? templateMethod.key,
+    `Wrap the result in an element or a fragment, e.g. return <>{cond ? <A /> : <B />}</>.`,
+  )
 }
 
 function collectLocalClassComponents(ast: File): Set<string> {
