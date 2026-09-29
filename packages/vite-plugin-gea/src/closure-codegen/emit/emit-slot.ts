@@ -1,6 +1,6 @@
 import type { Expression, Statement } from '@babel/types'
 
-import { t } from '../../utils/babel-interop.ts'
+import { generate, t } from '../../utils/babel-interop.ts'
 import { compilerError } from '../../utils/compile-error.ts'
 
 import { emitConditionalSlot } from './emit-conditional.ts'
@@ -14,6 +14,8 @@ import { eventHandlerNeedsCurrentTarget } from './emit-event-current-target.ts'
 import { normalizeEventAttrName, type Slot } from '../generator.ts'
 
 export function emitSlot(slot: Slot, stmts: Statement[], ctx: EmitContext): void {
+  // The expression as written, for errors that point at the source.
+  const written = slot.expr
   // Substitute destructured identifiers with their source expressions so tracking works
   slot.expr = substituteBindings(slot.expr, ctx.bindings)
   if (slot.kind === 'text') {
@@ -254,13 +256,7 @@ export function emitSlot(slot: Slot, stmts: Statement[], ctx: EmitContext): void
     // the assignment with the substituted LHS.
     const elId = t.identifier('el' + slot.index)
     const target = substituteBindings(slot.expr, ctx.bindings)
-    if (!t.isMemberExpression(target) && !t.isIdentifier(target)) {
-      throw compilerError(
-        'ref only accepts a property or variable to assign the element to; callback refs are not supported.',
-        slot.expr,
-        'Use an assignable target, e.g. ref={this.input}, and read this.input after render.',
-      )
-    }
+    if (!t.isMemberExpression(target) && !t.isIdentifier(target)) throw refTargetError(written, target, ctx)
     stmts.push(t.expressionStatement(t.assignmentExpression('=', target as any, elId)))
     return
   }
@@ -281,6 +277,32 @@ export function emitSlot(slot: Slot, stmts: Statement[], ctx: EmitContext): void
     return
   }
   throw new Error(`emit: unsupported slot kind '${slot.kind}'`)
+}
+
+/** Why `ref={…}` has nothing to assign the element to, at the ref as written. */
+function refTargetError(written: any, target: Expression, ctx: EmitContext): Error {
+  let expr = written
+  while (t.isTSAsExpression(expr) || t.isTSNonNullExpression(expr) || t.isTSTypeAssertion(expr)) expr = expr.expression
+  const hint = 'Use an assignable target, e.g. ref={this.input}, and read this.input after render.'
+  if (t.isFunction(expr)) {
+    return compilerError(
+      'ref only accepts a property or variable to assign the element to; callback refs are not supported.',
+      written,
+      hint,
+    )
+  }
+  if (t.isIdentifier(expr)) {
+    // A local the compiler inlines as its initializer (`let el = null`).
+    const code = generate(target).code
+    const value = code.length <= 40 ? ` (${code})` : ''
+    return compilerError(
+      `ref={${expr.name}} has no variable to assign the element to: the compiler inlines \`${expr.name}\` as its initializer${value}.`,
+      written,
+      `Declare it as \`let ${expr.name}\` with no initializer so it stays a variable` +
+        (t.isThisExpression(ctx.reactiveRoot) ? ', or use a class field such as ref={this.input}.' : '.'),
+    )
+  }
+  return compilerError('ref only accepts a property or variable to assign the element to.', written, hint)
 }
 
 function canUseScalarTextHelper(expr: Expression): boolean {
