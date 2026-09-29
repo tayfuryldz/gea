@@ -44498,6 +44498,16 @@ function bodyReturnsJSX(block) {
   return !!ret && nodeReturnsJSX(ret.argument);
 }
 
+function compilerError(message, node, hint) {
+  const err = new Error(hint ? `${message}
+${hint}` : message);
+  err.__geaCompileError = true;
+  if (hint) err.hint = hint;
+  const start = node?.loc?.start;
+  if (start) err.loc = { line: start.line, column: start.column };
+  return err;
+}
+
 function createEmitContext(reactiveRoot) {
   return {
     templateDecls: [],
@@ -48418,6 +48428,10 @@ function toGeaEventType(attrName) {
   if (attrName.startsWith("on") && attrName.length > 2) return attrName.slice(2).toLowerCase();
   return attrName;
 }
+function isCaptureEventAttr(attrName) {
+  if (!/^on[A-Z]\w*Capture$/.test(attrName)) return false;
+  return attrName !== "onGotPointerCapture" && attrName !== "onLostPointerCapture";
+}
 
 function escapeAttr(s) {
   return s.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
@@ -48478,16 +48492,6 @@ const VOID_TAGS = /* @__PURE__ */ new Set([
 ]);
 function normalizeEventAttrName(name) {
   return toGeaEventType(name);
-}
-
-function compilerError(message, node, hint) {
-  const err = new Error(hint ? `${message}
-${hint}` : message);
-  err.__geaCompileError = true;
-  if (hint) err.hint = hint;
-  const start = node?.loc?.start;
-  if (start) err.loc = { line: start.line, column: start.column };
-  return err;
 }
 
 const OPTIONAL_TABLE_END_TAGS = /* @__PURE__ */ new Set(["colgroup", "thead", "tbody", "tfoot", "tr", "td", "th"]);
@@ -48638,8 +48642,23 @@ function walkJsxToTemplate(root, options = {}) {
     }
     let html2 = "<" + tagName;
     for (const attr of opening.attributes) {
+      if (libExports.isJSXSpreadAttribute(attr)) {
+        throw compilerError(
+          `Spread attributes like {...${spreadSource(attr.argument)}} on <${tagName}> are not supported.`,
+          attr,
+          `Pass each attribute individually: <${tagName} id={\u2026} onClick={\u2026}>.`
+        );
+      }
       if (libExports.isJSXAttribute(attr)) {
         const rawAttrName = libExports.isJSXIdentifier(attr.name) ? attr.name.name : "";
+        if (isCaptureEventAttr(rawAttrName)) {
+          const bubbling = rawAttrName.slice(0, -"Capture".length);
+          throw compilerError(
+            `Capture-phase event handlers like ${rawAttrName} are not supported yet.`,
+            attr,
+            `Use ${bubbling}, or add the listener yourself in onAfterRender() with addEventListener('${toGeaEventType(bubbling)}', handler, true).`
+          );
+        }
         const attrName = normalizeAttrName(rawAttrName);
         if (!attr.value) {
           html2 += " " + attrName;
@@ -48828,6 +48847,10 @@ function walkJsxToTemplate(root, options = {}) {
   }
   const html = emitNode(root, [], [], true, null);
   return { html, slots };
+}
+function spreadSource(argument) {
+  const code = generate$1(argument).code;
+  return code.length <= 40 ? code : "\u2026";
 }
 function jsxMemberTagName(name) {
   const object = libExports.isJSXMemberExpression(name.object) ? jsxMemberTagName(name.object) : name.object.name;
@@ -49058,9 +49081,14 @@ function emitSlot(slot, stmts, ctx) {
   if (slot.kind === "ref") {
     const elId = libExports.identifier("el" + slot.index);
     const target = substituteBindings(slot.expr, ctx.bindings);
-    if (libExports.isMemberExpression(target) || libExports.isIdentifier(target)) {
-      stmts.push(libExports.expressionStatement(libExports.assignmentExpression("=", target, elId)));
+    if (!libExports.isMemberExpression(target) && !libExports.isIdentifier(target)) {
+      throw compilerError(
+        "ref only accepts a property or variable to assign the element to; callback refs are not supported.",
+        slot.expr,
+        "Use an assignable target, e.g. ref={this.input}, and read this.input after render."
+      );
     }
+    stmts.push(libExports.expressionStatement(libExports.assignmentExpression("=", target, elId)));
     return;
   }
   if (slot.kind === "mount") {
@@ -50758,6 +50786,84 @@ function foldEarlyReturnGuards(templateMethod) {
   body.splice(firstGuardIdx, finalIdx - firstGuardIdx + 1, libExports.returnStatement(frag));
 }
 
+function assertNoStringTags(ast) {
+  const tags = /* @__PURE__ */ new Set();
+  const strings = /* @__PURE__ */ new Set();
+  const visit = (node) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child);
+      return;
+    }
+    if (libExports.isJSXOpeningElement(node) && libExports.isJSXIdentifier(node.name) && isComponentTagName(node.name.name)) {
+      tags.add(node.name.name);
+    }
+    if (libExports.isVariableDeclarator(node) && libExports.isIdentifier(node.id) && node.init && isStringValued(node.init)) {
+      strings.add(node.id.name);
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "loc" || key === "start" || key === "end" || key === "type") continue;
+      visit(node[key]);
+    }
+  };
+  visit(ast.program);
+  if (![...tags].some((name) => strings.has(name))) return;
+  traverse$1(libExports.cloneNode(ast, true), {
+    JSXOpeningElement(path) {
+      const name = path.node.name;
+      if (!libExports.isJSXIdentifier(name) || !strings.has(name.name)) return;
+      const binding = path.scope.getBinding(name.name);
+      if (!binding || !binding.path.isVariableDeclarator()) return;
+      const init = binding.path.node.init;
+      if (!init || !isStringValued(init)) return;
+      const writes = binding.constantViolations;
+      if (!writes.every((w) => w.isAssignmentExpression({ operator: "=" }) && isStringValued(w.node.right))) return;
+      throw compilerError(
+        `<${name.name}> holds a string, not a component, so it would render nothing.`,
+        name,
+        `A JSX tag can't come from a string variable. Write the element itself, or pick one with a conditional: {cond ? <section>\u2026</section> : <div>\u2026</div>}.`
+      );
+    }
+  });
+}
+function isComponentTagName(name) {
+  return name[0] === name[0].toUpperCase();
+}
+function isStringValued(node) {
+  if (libExports.isStringLiteral(node) || libExports.isTemplateLiteral(node)) return true;
+  if (libExports.isTSAsExpression(node) || libExports.isTSSatisfiesExpression(node) || libExports.isTSTypeAssertion(node) || libExports.isTSNonNullExpression(node) || libExports.isParenthesizedExpression(node)) {
+    return isStringValued(node.expression);
+  }
+  if (libExports.isConditionalExpression(node)) return isStringValued(node.consequent) && isStringValued(node.alternate);
+  if (libExports.isLogicalExpression(node) && node.operator !== "&&") {
+    return isStringValued(node.left) && isStringValued(node.right);
+  }
+  return false;
+}
+function assertNoNestedComponentClasses(ast) {
+  const visit = (node, inFunction) => {
+    if (!node || typeof node !== "object") return;
+    if (Array.isArray(node)) {
+      for (const child of node) visit(child, inFunction);
+      return;
+    }
+    if (inFunction && libExports.isClass(node) && extendsComponent(node) && bodyContainsJsx(node.body)) {
+      const name = node.id ? `\`${node.id.name}\` ` : "";
+      throw compilerError(
+        `Component class ${name}is declared inside a function. Only top-level component classes are compiled.`,
+        node,
+        "Declare the class at the top level of the module, and pass values in as props."
+      );
+    }
+    const nested = inFunction || libExports.isFunction(node);
+    for (const key of Object.keys(node)) {
+      if (key === "loc" || key === "start" || key === "end" || key === "type") continue;
+      visit(node[key], nested);
+    }
+  };
+  visit(ast.program, false);
+}
+
 function transformFile(source, _filename, options = {}) {
   if (!source.includes("<") || !source.includes(">")) {
     return { code: source, changed: false, rewritten: [], importsNeeded: [] };
@@ -50772,6 +50878,8 @@ function transformFile(source, _filename, options = {}) {
   } catch {
     return { code: source, changed: false, rewritten: [], importsNeeded: [] };
   }
+  assertNoNestedComponentClasses(ast);
+  assertNoStringTags(ast);
   const ctx = createEmitContext();
   ctx.irTemplates = [];
   ctx.embedded = options.embedded;
@@ -50818,9 +50926,12 @@ function transformFile(source, _filename, options = {}) {
         if (bodyContainsJsx(m.body)) methodsWithJsx.push(m);
       }
       if (!templateMethod && methodsWithJsx.length === 0) continue;
-      if (templateMethod && !extendsComponent(classDecl)) continue;
+      if (templateMethod && !extendsComponent(classDecl) && !extendsKnownComponent(classDecl, ctx)) continue;
       const jsx = templateMethod ? extractTemplateJsx(templateMethod) : null;
-      if (templateMethod && !jsx) continue;
+      if (templateMethod && !jsx) {
+        if (bodyContainsJsx(templateMethod.body)) throw nonJsxTemplateError(classDecl, templateMethod);
+        continue;
+      }
       const useStaticCompiledComponent = canUseStaticCompiledComponent(classDecl);
       const useCompiledComponent = !useStaticCompiledComponent && canSkipComponentStoreProxy(classDecl);
       const useTinyReactiveComponent = options.enableTinyReactiveComponents !== false && !useStaticCompiledComponent && !useCompiledComponent && canUseTinyReactiveComponent(classDecl);
@@ -51072,6 +51183,18 @@ function applyPropsTypeArgument(classDecl, className, componentPropsShapes, comp
   const emptyPropsType = libExports.tsTypeLiteral([]);
   if (!classPropsReadsAreCovered(classDecl, emptyPropsType)) return;
   classDecl.superTypeParameters = libExports.tsTypeParameterInstantiation([emptyPropsType]);
+}
+function extendsKnownComponent(classDecl, ctx) {
+  return libExports.isIdentifier(classDecl.superClass) && ctx.directClassComponents?.has(classDecl.superClass.name) === true;
+}
+function nonJsxTemplateError(classDecl, templateMethod) {
+  const className = classDecl.id?.name ?? "<anonymous>";
+  const ret = templateMethod.body.body.find((s) => libExports.isReturnStatement(s));
+  return compilerError(
+    `\`${className}.template()\` must return a single JSX element or fragment.`,
+    ret?.argument ?? templateMethod.key,
+    `Wrap the result in an element or a fragment, e.g. return <>{cond ? <A /> : <B />}</>.`
+  );
 }
 function collectLocalClassComponents(ast) {
   const names = /* @__PURE__ */ new Set();
