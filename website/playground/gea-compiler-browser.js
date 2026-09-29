@@ -47938,6 +47938,58 @@ function pendingEventsWillInstallDelegateClick$1(ctx) {
   return hasClick;
 }
 
+const PROP_JSX_HELPER = "__geaPropJsx";
+const PROP_JSX_HELPER_SOURCE = `function ${PROP_JSX_HELPER}(d, sites, perRead) {
+  const owner = Symbol.for('gea.jsx.owner')
+  const built = []
+  const picked = []
+  const scopes = []
+  for (let i = 0; i < sites; i++) scopes.push(d.child())
+  let reads = 0
+  let shown = []
+  if (perRead) {
+    d.add(() => {
+      for (const s of shown) s.d.dispose()
+      shown = []
+    })
+  }
+  return {
+    site(i, build) {
+      picked[i] = reads
+      return built[i] ?? (built[i] = build(scopes[i]))
+    },
+    read(fn) {
+      const id = ++reads
+      const own = perRead ? createDisposer() : d
+      const v = fn(own)
+      for (let i = 0; i < sites; i++) {
+        if (built[i] !== undefined && picked[i] !== id) {
+          built[i] = undefined
+          scopes[i].dispose()
+        }
+      }
+      if (perRead) {
+        shown = shown.filter((s) => s.nodes.some((n) => n[owner] === s.d && n.parentNode) || (s.d.dispose(), false))
+        const nodes = (Array.isArray(v) ? v : [v]).filter(
+          (n) => n != null && typeof n.nodeType === 'number' && !built.includes(n),
+        )
+        if (nodes.length === 0) own.dispose()
+        else {
+          for (const n of nodes) n[owner] = own
+          shown.push({ d: own, nodes })
+        }
+      }
+      return v
+    },
+  }
+}`;
+function propJsxHelperDecl() {
+  return libExports$1.parse(PROP_JSX_HELPER_SOURCE, { sourceType: "module" }).program.body[0];
+}
+function isPropJsxHelperDecl(stmt) {
+  return libExports.isFunctionDeclaration(stmt) && !!stmt.id && stmt.id.name === PROP_JSX_HELPER;
+}
+
 function emitMountSlot(slot, stmts, ctx) {
   const anchorId = libExports.identifier("anchor" + slot.index);
   const tag = slot.payload.tag;
@@ -48200,27 +48252,65 @@ function memoizedThunk(block) {
   return libExports.callExpression(outer, []);
 }
 function buildExpressionThunk(expr, ctx, isChildren) {
-  const sites = [];
-  const value = lowerJsxInExpression(expr, ctx, (built) => {
-    const id = libExports.identifier("__m" + sites.length);
-    sites.push(id);
-    return libExports.logicalExpression("??", id, libExports.assignmentExpression("=", libExports.cloneNode(id), built));
-  });
-  const thunk = libExports.arrowFunctionExpression([], value);
-  if (sites.length === 0) {
-    return !isChildren && containsJsx(expr) ? memoizedThunk(libExports.blockStatement([libExports.returnStatement(value)])) : thunk;
+  const nested = nestedFunctionJsx(expr);
+  if (nested !== "none" && !isChildren) {
+    return memoizedThunk(libExports.blockStatement([libExports.returnStatement(lowerJsxInExpression(expr, ctx))]));
   }
+  let sites = 0;
+  const value = lowerJsxInExpression(
+    expr,
+    ctx,
+    (built) => libExports.callExpression(libExports.memberExpression(libExports.identifier("__j"), libExports.identifier("site")), [
+      libExports.numericLiteral(sites++),
+      libExports.arrowFunctionExpression([libExports.identifier("d")], built.callee.body)
+    ])
+  );
+  const perRead = nested === "called";
+  if (sites === 0 && !perRead) return libExports.arrowFunctionExpression([], value);
+  ctx.importsNeeded.add(PROP_JSX_HELPER);
+  if (perRead) ctx.importsNeeded.add("createDisposer");
   const outer = libExports.arrowFunctionExpression(
     [],
     libExports.blockStatement([
-      libExports.variableDeclaration(
-        "let",
-        sites.map((id) => libExports.variableDeclarator(libExports.cloneNode(id)))
-      ),
-      libExports.returnStatement(thunk)
+      libExports.variableDeclaration("const", [
+        libExports.variableDeclarator(
+          libExports.identifier("__j"),
+          libExports.callExpression(libExports.identifier(PROP_JSX_HELPER), [
+            libExports.identifier("d"),
+            libExports.numericLiteral(sites),
+            libExports.booleanLiteral(perRead)
+          ])
+        )
+      ]),
+      libExports.variableDeclaration("const", [
+        libExports.variableDeclarator(libExports.identifier("__v"), libExports.arrowFunctionExpression([libExports.identifier("d")], value))
+      ]),
+      libExports.returnStatement(
+        libExports.arrowFunctionExpression(
+          [],
+          libExports.callExpression(libExports.memberExpression(libExports.identifier("__j"), libExports.identifier("read")), [libExports.identifier("__v")])
+        )
+      )
     ])
   );
   return libExports.callExpression(outer, []);
+}
+function nestedFunctionJsx(expr) {
+  let found = "none";
+  const visit = (node, isArgument) => {
+    if (!node || typeof node !== "object" || found === "escaping") return;
+    if (libExports.isJSXElement(node) || libExports.isJSXFragment(node)) return;
+    if (libExports.isFunction(node) && containsJsx(node)) found = isArgument ? "called" : "escaping";
+    const isCall = libExports.isCallExpression(node) || libExports.isOptionalCallExpression(node) || libExports.isNewExpression(node);
+    for (const k of Object.keys(node)) {
+      if (k === "loc" || k === "start" || k === "end" || k === "type") continue;
+      const v = node[k];
+      if (Array.isArray(v)) for (const x of v) visit(x, isCall && k === "arguments");
+      else visit(v, false);
+    }
+  };
+  visit(expr, false);
+  return found;
 }
 function buildPropsObject(attrs, ctx) {
   const properties = [];
@@ -50649,6 +50739,16 @@ function ensureNamedImports(ast, source, required) {
   }
 }
 function ensureCoreImports(ast, helpers) {
+  if (helpers.has(PROP_JSX_HELPER)) {
+    const body = ast.program.body;
+    if (!body.some(isPropJsxHelperDecl)) {
+      let at = 0;
+      while (at < body.length && libExports.isImportDeclaration(body[at])) at++;
+      body.splice(at, 0, propJsxHelperDecl());
+    }
+    helpers = new Set(helpers);
+    helpers.delete(PROP_JSX_HELPER);
+  }
   ensureNamedImports(ast, COMPILER_RUNTIME_ID, helpers);
 }
 
