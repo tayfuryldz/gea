@@ -48628,7 +48628,16 @@ function walkJsxToTemplate(root, options = {}) {
       );
     }
     const tagName = name.name;
-    if (tagName[0] === tagName[0].toUpperCase()) {
+    const isComponentTag = tagName[0] === tagName[0].toUpperCase();
+    const spread = opening.attributes.find((attr) => libExports.isJSXSpreadAttribute(attr));
+    if (spread) {
+      throw compilerError(
+        `Spread attributes like {...${spreadSource(spread.argument)}} on <${tagName}> are not supported.`,
+        spread,
+        isComponentTag ? `Pass each prop individually: <${tagName} label={\u2026} onSelect={\u2026} />.` : `Pass each attribute individually: <${tagName} id={\u2026} onClick={\u2026}>.`
+      );
+    }
+    if (isComponentTag) {
       const slot = {
         index: nextSlot++,
         walk: walk.slice(),
@@ -48642,13 +48651,6 @@ function walkJsxToTemplate(root, options = {}) {
     }
     let html2 = "<" + tagName;
     for (const attr of opening.attributes) {
-      if (libExports.isJSXSpreadAttribute(attr)) {
-        throw compilerError(
-          `Spread attributes like {...${spreadSource(attr.argument)}} on <${tagName}> are not supported.`,
-          attr,
-          `Pass each attribute individually: <${tagName} id={\u2026} onClick={\u2026}>.`
-        );
-      }
       if (libExports.isJSXAttribute(attr)) {
         const rawAttrName = libExports.isJSXIdentifier(attr.name) ? attr.name.name : "";
         if (isCaptureEventAttr(rawAttrName)) {
@@ -50801,6 +50803,9 @@ function assertNoStringTags(ast) {
     if (libExports.isVariableDeclarator(node) && libExports.isIdentifier(node.id) && node.init && isStringValued(node.init)) {
       strings.add(node.id.name);
     }
+    if (libExports.isAssignmentExpression(node, { operator: "=" }) && libExports.isIdentifier(node.left) && isStringValued(node.right)) {
+      strings.add(node.left.name);
+    }
     for (const key of Object.keys(node)) {
       if (key === "loc" || key === "start" || key === "end" || key === "type") continue;
       visit(node[key]);
@@ -50815,8 +50820,9 @@ function assertNoStringTags(ast) {
       const binding = path.scope.getBinding(name.name);
       if (!binding || !binding.path.isVariableDeclarator()) return;
       const init = binding.path.node.init;
-      if (!init || !isStringValued(init)) return;
+      if (init && !isStringValued(init)) return;
       const writes = binding.constantViolations;
+      if (!init && writes.length === 0) return;
       if (!writes.every((w) => w.isAssignmentExpression({ operator: "=" }) && isStringValued(w.node.right))) return;
       throw compilerError(
         `<${name.name}> holds a string, not a component, so it would render nothing.`,
