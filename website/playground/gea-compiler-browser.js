@@ -47969,14 +47969,15 @@ const PROP_JSX_HELPER_SOURCE = `function ${PROP_JSX_HELPER}(d, sites, perRead) {
         }
       }
       if (perRead) {
-        shown = shown.filter((s) => s.nodes.some((n) => n[owner] === s.d && n.parentNode) || (s.d.dispose(), false))
+        shown = shown.filter((s) => s.nodes.some((n) => n[owner] === s && n.parentNode) || (s.d.dispose(), false))
         const nodes = (Array.isArray(v) ? v : [v]).filter(
           (n) => n != null && typeof n.nodeType === 'number' && !built.includes(n),
         )
         if (nodes.length === 0) own.dispose()
         else {
-          for (const n of nodes) n[owner] = own
-          shown.push({ d: own, nodes })
+          const rec = { d: own, nodes }
+          for (const n of nodes) n[owner] = rec
+          shown.push(rec)
         }
       }
       return v
